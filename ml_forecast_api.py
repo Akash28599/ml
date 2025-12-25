@@ -1,4 +1,4 @@
-# ml_forecast_api.py - WITH JOBLIB FIX
+# ml_forecast_api.py - WITH JOBLIB FIX & RENDER COMPATIBILITY
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pandas as pd
@@ -401,10 +401,39 @@ def forecast_status():
         'message': 'Machine learning forecasting API is running'
     })
 
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint for Render"""
+    return jsonify({
+        'status': 'healthy',
+        'service': 'ml_forecast_api',
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/', methods=['GET'])
+def index():
+    """Root endpoint"""
+    return jsonify({
+        'service': 'Commodity ML Forecast API',
+        'version': '1.0',
+        'endpoints': {
+            'POST /api/forecast': 'Generate ML forecasts for commodities',
+            'GET /api/forecast/status': 'Check API status',
+            'GET /api/health': 'Health check'
+        }
+    })
+
 if __name__ == '__main__':
+    # Get port from environment variable (Render provides this)
+    port = int(os.environ.get('PORT', 5001))
+    host = os.environ.get('HOST', '0.0.0.0')  # FIXED: Use 0.0.0.0 for Render
+    
     print("=" * 60)
     print("ML Forecast API Starting...")
+    print(f"Host: {host}, Port: {port}")
     print("NOTE: Using n_jobs=1 to avoid joblib compatibility issues")
-    print(f"Server will run on: http://127.0.0.1:5001")
+    print(f"Server will run on: http://{host}:{port}")
     print("=" * 60)
-    app.run(debug=True, port=5001, use_reloader=False)
+    
+    # FIXED: Bind to all interfaces (0.0.0.0) instead of localhost
+    app.run(debug=True, host=host, port=port, use_reloader=False)

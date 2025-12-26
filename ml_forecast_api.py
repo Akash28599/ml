@@ -436,4 +436,4 @@ if __name__ == '__main__':
     print(f"  POST /api/forecast - Generate forecasts")
     print(f"  GET  /api/forecast/status - Service status")
     print(f"  GET  /api/fetchCommodity - CSV data")
-    app.run(host='0.0.0.0', port=port, debug=false)
+    app.run(host='0.0.0.0', port=port, debug=False)

@@ -489,7 +489,7 @@ def forecast():
         
         data = request.json
         commodity = data.get('commodity')
-        months = data.get('months', 12)
+        months = data.get('months', 24)
         
         if not commodity or commodity not in BARCHART_COMMODITY_CONFIG:
             return jsonify({'error': f'Unsupported commodity: {commodity}'}), 400

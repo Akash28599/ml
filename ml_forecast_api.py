@@ -254,7 +254,7 @@ def load_commodity_data(commodity_name):
         return None
 
 def create_monthly_averages(df, years_back=5):
-    """NEW: Create monthly averages from trading days over 5 years"""
+    """MODIFIED: Train on 2020-2024 (fixed years), predict 2025-2026"""
     if df is None or len(df) < 30:
         return None
     
@@ -262,38 +262,33 @@ def create_monthly_averages(df, years_back=5):
     df['month_num'] = df['date'].dt.month
     df['year'] = df['date'].dt.year
     
-    # Filter last 5 years
-    current_year = df['date'].max().year
-    df_filtered = df[df['year'] >= current_year - years_back]
+    # FIXED: Use ONLY 2020-2024 for training (5 years)
+    df_filtered = df[df['year'].between(2020, 2024)]
     
     if len(df_filtered) < 12:
         return None
     
-    # Group by month number (Jan=1, Feb=2, etc.) and calculate average across all years
+    # Group by month number - 2020-2024 September average only
     monthly_averages = df_filtered.groupby('month_num')['close'].agg(['mean', 'std', 'count']).reset_index()
     monthly_averages.columns = ['month_num', 'avg_close', 'std_close', 'trading_days']
     
-    # Create date range for each month (using current year for display)
+    # PREDICT 2025 dates (current_year = 2025)
+    current_year = 2025  # Force 2025 for display/prediction
     monthly_data = []
-    current_year_dates = []
     
     for month_num in range(1, 13):
         month_data = monthly_averages[monthly_averages['month_num'] == month_num]
         if len(month_data) > 0:
-            # Create ~20 trading days per month with variation around average
             month_avg = month_data['avg_close'].iloc[0]
             month_std = month_data['std_close'].iloc[0]
             trading_days = month_data['trading_days'].iloc[0]
             
-            # Generate trading days for this month
             start_date = pd.Timestamp(f"{current_year}-{month_num:02d}-01")
             end_date = (start_date + pd.DateOffset(months=1) - pd.Timedelta(days=1))
             
-            # Sample trading days around the average
             for day_offset in range(0, min(22, trading_days), 2):
                 trade_date = start_date + pd.Timedelta(days=day_offset)
                 if trade_date <= end_date:
-                    # Add realistic daily variation
                     daily_variation = np.random.normal(0, month_std * 0.1)
                     daily_price = max(0.1, month_avg + daily_variation)
                     
@@ -304,13 +299,12 @@ def create_monthly_averages(df, years_back=5):
                         'is_monthly_avg': True,
                         'trading_days_in_month': int(trading_days)
                     })
-                    current_year_dates.append(trade_date.strftime('%Y-%m-%d'))
     
     monthly_df = pd.DataFrame(monthly_data)
     if len(monthly_df) < 12:
         return None
-    
-    return monthly_df.sort_values('date'), current_year_dates
+        
+    return monthly_df.sort_values('date'), None
 
 def create_monthly_features(df_monthly):
     """Create features from monthly aggregated data"""

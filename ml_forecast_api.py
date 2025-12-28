@@ -1,4 +1,4 @@
-# ml_forecast_api_smart_hybrid.py - SMART MODEL SELECTION
+# ml_forecast_api_smart_hybrid.py - SMART MODEL SELECTION WITH ADDED NEWS FEATURES
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pandas as pd
@@ -10,13 +10,65 @@ import json
 import sys
 from scipy import stats
 import traceback
+import requests
+from bs4 import BeautifulSoup
+import time
 
 warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
 CORS(app)
 
-# Smart model selection configuration
+# News configuration - ADDED FROM OLD FILE
+BARCHART_COMMODITY_CONFIG = {
+    'wheat': {
+        'name': 'Wheat CBOT',
+        'symbol': 'ZW*1',
+        'barchart_url': 'https://www.barchart.com/futures/quotes/ZWH26/overview',
+        'icon': '🌾'
+    },
+    'milling_wheat': {
+        'name': 'Milling Wheat',
+        'symbol': 'MLH26',
+        'barchart_url': 'https://www.barchart.com/futures/quotes/MLH26/overview',
+        'icon': '🌾'
+    },
+    'palm': {
+        'name': 'Palm Oil',
+        'symbol': 'KOF26',
+        'barchart_url': 'https://www.barchart.com/futures/quotes/KOF26/overview',
+        'icon': '🌴'
+    },
+    'sugar': {
+        'name': 'Sugar',
+        'symbol': 'SBH26',
+        'barchart_url': 'https://www.barchart.com/futures/quotes/SBH26/overview',
+        'icon': '🍬'
+    },
+    'aluminum': {
+        'name': 'Aluminum',
+        'symbol': 'ALZ25',
+        'barchart_url': 'https://www.barchart.com/futures/quotes/ALZ25/overview',
+        'icon': '🥫'
+    },
+    'crude_palm': {
+        'name': 'Brent Crude Oil',
+        'symbol': 'CBZ26',
+        'barchart_url': 'https://www.barchart.com/futures/quotes/CBZ26/overview',
+        'icon': '🛢️'
+    }
+}
+
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+}
+
+NEWS_CACHE = {}
+NEWS_CACHE_TIMEOUT = 300  # 5 minutes
+
+# Smart model selection configuration (EXISTING - UNCHANGED)
 MODEL_CONFIG = {
     'wheat': {
         'preferred_model': 'simple_ensemble',  # XGBoost made it WORSE
@@ -60,6 +112,137 @@ MODEL_CONFIG = {
     }
 }
 
+# NEWS FUNCTIONS - ADDED FROM OLD FILE
+def get_default_image(commodity_key):
+    """Get default image for commodity news"""
+    image_map = {
+        'wheat': 'https://via.placeholder.com/150/E3B23C/FFFFFF?text=WHEAT',
+        'milling_wheat': 'https://via.placeholder.com/150/D4A76A/FFFFFF?text=MILLING',
+        'palm': 'https://via.placeholder.com/150/4A772F/FFFFFF?text=PALM',
+        'sugar': 'https://via.placeholder.com/150/FF6B6B/FFFFFF?text=SUGAR',
+        'aluminum': 'https://via.placeholder.com/150/7E8C9C/FFFFFF?text=ALUM',
+        'crude_palm': 'https://via.placeholder.com/150/2C3E50/FFFFFF?text=CRUDE'
+    }
+    return image_map.get(commodity_key, 'https://via.placeholder.com/150/CCCCCC/333333?text=NEWS')
+
+def get_fallback_news(commodity_key):
+    """Get fallback news when scraping fails"""
+    config = BARCHART_COMMODITY_CONFIG.get(commodity_key, {})
+    return [{
+        "title": f"Market Analysis: {config.get('name', commodity_key)}",
+        "description": f"Latest trends and analysis for {config.get('name', commodity_key)}. Click to read more on Barchart.",
+        "imageUrl": get_default_image(commodity_key),
+        "link": config.get('barchart_url', 'https://www.barchart.com'),
+        "commodity": commodity_key,
+        "symbol": config.get('symbol', 'N/A'),
+        "scrapedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "isFallback": True
+    }]
+
+def extract_news_from_barchart(html_content, commodity_key):
+    """Extract news articles from Barchart HTML"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    news_items = []
+    
+    # Look for most recent stories
+    recent_stories_heading = soup.find(['h3', 'h4', 'div'], text=lambda t: t and 'Most Recent Stories' in str(t))
+    
+    if recent_stories_heading:
+        news_container = recent_stories_heading.find_next(['div', 'ul', 'section'])
+        if news_container:
+            news_elements = news_container.find_all(['li', 'article', 'div'], class_=lambda c: c and any(x in str(c) for x in ['news', 'story', 'article']), limit=5)
+            
+            for element in news_elements:
+                title_elem = element.find(['a', 'h4', 'h5'])
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+                    link = title_elem.get('href', '')
+                    if link and not link.startswith('http'):
+                        link = 'https://www.barchart.com' + link
+                    
+                    desc_elem = element.find(['p', 'div', 'span'], class_=lambda c: c and any(x in str(c) for x in ['summary', 'description', 'text']))
+                    description = desc_elem.get_text(strip=True) if desc_elem else "Click to read more"
+                    
+                    img_elem = element.find('img')
+                    image_url = img_elem.get('src', '') if img_elem else get_default_image(commodity_key)
+                    if image_url and not image_url.startswith('http'):
+                        image_url = 'https://www.barchart.com' + image_url
+                    
+                    news_items.append({
+                        "title": title[:100] + "..." if len(title) > 100 else title,
+                        "description": description[:150] + "..." if len(description) > 150 else description,
+                        "imageUrl": image_url or get_default_image(commodity_key),
+                        "link": link or BARCHART_COMMODITY_CONFIG.get(commodity_key, {}).get('barchart_url', 'https://www.barchart.com'),
+                        "commodity": commodity_key,
+                        "symbol": BARCHART_COMMODITY_CONFIG.get(commodity_key, {}).get('symbol', ''),
+                        "scrapedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "source": "Barchart"
+                    })
+    
+    # Fallback method if first method didn't work
+    if not news_items:
+        news_links = soup.find_all('a', href=lambda href: href and any(x in href for x in ['news', 'article', 'story']), limit=5)
+        for link in news_links:
+            title = link.get_text(strip=True)
+            if title and len(title) > 10:
+                href = link.get('href', '')
+                if href and not href.startswith('http'):
+                    href = 'https://www.barchart.com' + href
+                
+                news_items.append({
+                    "title": title[:100] + "..." if len(title) > 100 else title,
+                    "description": "Market news and analysis",
+                    "imageUrl": get_default_image(commodity_key),
+                    "link": href or BARCHART_COMMODITY_CONFIG.get(commodity_key, {}).get('barchart_url', 'https://www.barchart.com'),
+                    "commodity": commodity_key,
+                    "symbol": BARCHART_COMMODITY_CONFIG.get(commodity_key, {}).get('symbol', ''),
+                    "scrapedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "source": "Barchart"
+                })
+    
+    return news_items
+
+def scrape_barchart_news(commodity_key, force_refresh=False):
+    """Scrape news from Barchart with caching"""
+    cache_key = f"{commodity_key}_news"
+    current_time = time.time()
+    
+    # Check cache first
+    if not force_refresh and cache_key in NEWS_CACHE:
+        cache_data = NEWS_CACHE[cache_key]
+        if current_time - cache_data['timestamp'] < NEWS_CACHE_TIMEOUT:
+            return cache_data['news']
+    
+    config = BARCHART_COMMODITY_CONFIG.get(commodity_key)
+    if not config or 'barchart_url' not in config:
+        return get_fallback_news(commodity_key)
+    
+    url = config['barchart_url']
+    
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        
+        news_items = extract_news_from_barchart(response.content, commodity_key)
+        
+        if news_items:
+            NEWS_CACHE[cache_key] = {
+                'news': news_items,
+                'timestamp': current_time,
+                'source': 'barchart'
+            }
+            return news_items
+        else:
+            return get_fallback_news(commodity_key)
+            
+    except requests.RequestException as e:
+        print(f"❌ News scraping error for {commodity_key}: {e}")
+        return get_fallback_news(commodity_key)
+    except Exception as e:
+        print(f"❌ Unexpected error scraping news for {commodity_key}: {e}")
+        return get_fallback_news(commodity_key)
+
+# EXISTING FORECAST FUNCTIONS - UNCHANGED
 def load_commodity_data(commodity_name):
     """Load CSV data with error handling"""
     csv_files = {
@@ -419,12 +602,6 @@ def smart_hybrid_prediction(df, target_year, target_month, commodity, historical
     """Intelligently choose the best model for each commodity"""
     config = MODEL_CONFIG.get(commodity, MODEL_CONFIG['wheat'])
     
-    # DECISION LOGIC based on your test results:
-    # 1. Wheat: XGBoost made it WORSE (16.42% vs 7.00% MAPE) → Use Simple
-    # 2. Milling Wheat: XGBoost made it WORSE (13.68% vs 11.86% MAPE) → Use Simple
-    # 3. Palm: XGBoost might help (test needed) → Try XGBoost first
-    # 4. Others: Use Simple (default)
-    
     if config['preferred_model'] == 'xgboost':
         print(f"🔍 Trying XGBoost for {commodity}...")
         try:
@@ -445,6 +622,7 @@ def smart_hybrid_prediction(df, target_year, target_month, commodity, historical
         print(f"🎯 Using Simple Ensemble for {commodity} (proven better)")
         return simple_ensemble_prediction(df, target_year, target_month, config, historical_2025_data)
 
+# EXISTING FORECAST ENDPOINT - UNCHANGED
 @app.route('/api/forecast', methods=['POST'])
 def forecast():
     try:
@@ -625,6 +803,76 @@ def forecast():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+# NEWS ENDPOINTS - ADDED FROM OLD FILE
+@app.route('/api/news/<commodity_key>', methods=['GET'])
+def get_commodity_news(commodity_key):
+    """Get news for a specific commodity"""
+    try:
+        force_refresh = request.args.get('refresh', 'false').lower() == 'true'
+        
+        if commodity_key not in BARCHART_COMMODITY_CONFIG:
+            return jsonify({
+                'error': f'Unsupported commodity: {commodity_key}',
+                'supported': list(BARCHART_COMMODITY_CONFIG.keys())
+            }), 400
+        
+        news_items = scrape_barchart_news(commodity_key, force_refresh)
+        
+        return jsonify({
+            'commodity': commodity_key,
+            'name': BARCHART_COMMODITY_CONFIG[commodity_key]['name'],
+            'news': news_items,
+            'count': len(news_items),
+            'lastUpdated': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'source': 'Barchart'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'commodity': commodity_key,
+            'news': get_fallback_news(commodity_key),
+            'error': str(e),
+            'isFallback': True
+        }), 200
+
+@app.route('/api/news/all', methods=['GET'])
+def get_all_commodity_news():
+    """Get news for all commodities"""
+    try:
+        force_refresh = request.args.get('refresh', 'false').lower() == 'true'
+        all_news = {}
+        
+        for commodity_key in BARCHART_COMMODITY_CONFIG.keys():
+            all_news[commodity_key] = scrape_barchart_news(commodity_key, force_refresh)
+            # Small delay to avoid overwhelming the server
+            time.sleep(0.5)
+        
+        return jsonify({
+            'news': all_news,
+            'count': {k: len(v) for k, v in all_news.items()},
+            'lastUpdated': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'source': 'Barchart'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'news': {k: get_fallback_news(k) for k in BARCHART_COMMODITY_CONFIG.keys()},
+            'error': str(e),
+            'isFallback': True
+        }), 200
+
+@app.route('/api/news/clear-cache', methods=['POST'])
+def clear_news_cache():
+    """Clear the news cache"""
+    global NEWS_CACHE
+    NEWS_CACHE.clear()
+    return jsonify({
+        'status': 'success',
+        'message': 'News cache cleared',
+        'cacheSize': 0
+    })
+
+# EXISTING ENDPOINTS - UNCHANGED
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({
@@ -635,6 +883,7 @@ def health_check():
 
 @app.route('/api/model_selection', methods=['GET'])
 def model_selection():
+    """Get model selection information"""
     commodity = request.args.get('commodity', 'wheat')
     config = MODEL_CONFIG.get(commodity, MODEL_CONFIG['wheat'])
     
@@ -666,18 +915,39 @@ def get_expected_mape(commodity):
     }
     return expected.get(commodity, expected['default'])
 
+# NEW STATUS ENDPOINT - COMBINING BOTH FEATURES
+@app.route('/api/status', methods=['GET'])
+def api_status():
+    """API status endpoint"""
+    return jsonify({
+        'status': 'running',
+        'service': 'Commodity Smart Hybrid Forecast & News API',
+        'version': '2.3-smart-hybrid-with-news',
+        'model_type': 'smart_hybrid_with_news_scraping',
+        'supportedFeatures': ['smart_hybrid_ml_forecasting', 'barchart_news_scraping', 'news_caching'],
+        'supportedCommodities': list(BARCHART_COMMODITY_CONFIG.keys()),
+        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'newsCacheSize': len(NEWS_CACHE),
+        'forecastModel': 'smart_hybrid_selection'
+    })
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5004))
-    print(f"\n🚀 SMART HYBRID Forecasting API running on port {port}")
+    print(f"\n🚀 SMART HYBRID Forecasting API with News Features running on port {port}")
     print("🎯 Key features:")
-    print("   ✅ Learns from your test results")
-    print("   ✅ Uses Simple Ensemble for wheat (XGBoost made it worse)")
-    print("   ✅ Uses Simple Ensemble for milling wheat (XGBoost made it worse)")
-    print("   ✅ Can try XGBoost for palm/crude palm if available")
-    print("   ✅ Fallback to simple model if XGBoost fails")
-    print("\n📊 Expected performance:")
-    print("   • Wheat: 7-8% MAPE (back to original good performance)")
-    print("   • Milling Wheat: 10-12% MAPE (back to acceptable)")
-    print("   • Palm: 6-7% MAPE (maintains good performance)")
+    print("   ✅ Smart model selection based on test results")
+    print("   ✅ Barchart news scraping for all commodities")
+    print("   ✅ 5-minute news caching for performance")
+    print("   ✅ Simple ensemble for wheat and milling wheat")
+    print("   ✅ XGBoost for palm/crude palm when available")
+    print("\n📊 Expected forecast performance:")
+    print("   • Wheat: 7-8% MAPE")
+    print("   • Milling Wheat: 10-12% MAPE")
+    print("   • Palm: 6-7% MAPE")
+    print("\n📰 News endpoints available:")
+    print("   • GET /api/news/<commodity>")
+    print("   • GET /api/news/all")
+    print("   • POST /api/news/clear-cache")
+    print("   • GET /api/status")
     
     app.run(host='0.0.0.0', port=port, debug=True)
